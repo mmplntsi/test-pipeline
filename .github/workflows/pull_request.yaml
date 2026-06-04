@@ -20,5 +20,6 @@ jobs:
       # 3. Trova tutti i file .php nel progetto ed esegue il linter nativo (php -l)
       # Se anche un solo file ha un errore (es. un punto e virgola mancante), il job fallisce
       - name: 3. Esecuzione PHP Lint
-        run: find . -name "*.php" -exec php -l {} \;
+        run: |
+          find . -name "*.php" -exec php -l {} \;
  
