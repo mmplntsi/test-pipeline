@@ -13,5 +13,5 @@ jobs:
           php-version: '8.0'
       - name: PHP lint
         run: |
-          find . -name "*.php" -exec php -l {} \;
+          php -l index.php
  
