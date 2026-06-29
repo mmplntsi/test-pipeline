@@ -2,5 +2,6 @@
 
 
 echo "Hello World!";
-echo "Hello World!";
-echo $_get['a'];
+
+$a = $_GET['a'];
+echo $a;
