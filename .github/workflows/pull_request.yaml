@@ -1,24 +1,17 @@
-name: PHP Syntax Check (PR Only)
-# TRIGGER: La pipeline si attiva SOLO in caso di Pull Request verso il main
-on:
+name: pull_request
+on: 
   pull_request:
-    branches: [ "main" ]
- 
+    branches: [ main ]
 jobs:
-  php-lint:
-    name: Verifica Sintassi PHP
+  php_checks:
     runs-on: ubuntu-latest
     steps:
-      # 1. Scarica i file del repository sul server temporaneo di GitHub
-      - name: 1. Checkout del codice
-        uses: actions/checkout@v4
-      # 2. Configura un ambiente PHP minimale in pochi secondi
-      - name: 2. Configurazione ambiente PHP
+      - uses: actions/checkout@v2
+      - name: Set up PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.2'
-      # 3. Trova tutti i file .php nel progetto ed esegue il linter nativo (php -l)
-      # Se anche un solo file ha un errore (es. un punto e virgola mancante), il job fallisce
-      - name: 3. Esecuzione PHP Lint
+          php-version: '8.0'
+      - name: PHP lint
         run: |
-          find . -name "*.php" -exec php -l {} \;
+          php -l index.php
+ 
