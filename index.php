@@ -4,4 +4,5 @@
 echo "Hello World!";
 
 $a = $_GET['a'];
-echo $a;
+$sql = "$a";
+mysqli_query($conn, $sql);
