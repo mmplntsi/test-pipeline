@@ -65,3 +65,34 @@ jobs:
           # Utilizza il container Docker ufficiale di Semgrep per scansionare il codice
           # L'opzione --error forza il fallimento del job (exit 1) se rileva vulnerabilità
           docker run --rm -v "${{ github.workspace }}:/src" semgrep/semgrep semgrep scan --config=auto --error
+rules:
+  - id: php-sqli-taint-tracking
+    languages:
+      - php
+    severity: ERROR
+    message: "Quality Gate Fallito: Rilevata potenziale SQL Injection. L'input utente non sanificato raggiunge una query SQL."
+    
+    # 1. ATTIVAZIONE DELLA TAINT ANALYSIS
+    mode: taint 
+
+    # 2. DEFINIZIONE DELLE SORGENTI (Input non sicuro dell'utente)
+    pattern-sources:
+      - pattern: $_GET[...]
+      - pattern: $_POST[...]
+      - pattern: $_REQUEST[...]
+      - pattern: $_COOKIE[...]
+      - pattern: $_SERVER[...]
+
+    # 3. DEFINIZIONE DELLE DESTINAZIONI VULNERABILI (Sinks)
+    pattern-sinks:
+      - patterns:
+          # Tracciamo l'esecuzione di query SQL tramite mysqli
+          - pattern: mysqli_query($CONN, $QUERY)
+          # Specifichiamo di concentrare l'analisi sulla variabile che contiene la query
+          - focus-metavariable: $QUERY
+
+    # 4. DEFINIZIONE DEI SANIFICATORI (Funzioni che rendono sicuro il dato)
+    pattern-sanitizers:
+      - pattern: mysqli_real_escape_string(...)
+      - pattern: intval(...)
+      - pattern: htmlspecialchars(...)
