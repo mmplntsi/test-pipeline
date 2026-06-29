@@ -1,17 +1,52 @@
-name: pull_request
-on: 
-  pull_request:
-    branches: [ main ]
-jobs:
-  php_checks:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v2
-      - name: Set up PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.0'
-      - name: PHP lint
-        run: |
-          php -l index.php
+stages:
+  - test
  
+variables:
+  PHP_IMAGE: "php:8.0-cli"
+ 
+php_differential_gate:
+  stage: test
+  image: $PHP_IMAGE
+  before_script:
+    # Installiamo Git nel runner temporaneo per consentire il calcolo delle differenze
+    - apt-get update -y && apt-get install -y git
+  script:
+    - echo "=== Avvio del controllo di qualità differenziale ==="
+    
+    # Scarichiamo il ramo principale per effettuare il confronto storico
+    - git fetch origin main
+    
+    # Estraiamo solo i file .php con stato Aggiunto (A) o Modificato (M)
+    - MODIFIED_FILES=$(git diff --name-only --diff-filter=AM origin/main...HEAD | grep '\.php$' || true)
+    
+    - |
+      if [ -z "$MODIFIED_FILES" ]; then
+        echo "Nessun file PHP modificato. Quality Gate superato con successo!"
+        exit 0
+      fi
+    
+    - echo "File modificati da validare:"
+    - echo "$MODIFIED_FILES"
+    
+    # Eseguiamo il linter di precisione
+    - SUCCESS=true
+    - |
+      for file in $MODIFIED_FILES; do
+        if [ -f "$file" ]; then
+          php -l "$file" || SUCCESS=false
+        fi
+      done
+    
+    # Esito finale del cancello di qualità
+    - |
+      if [ "$SUCCESS" = false ]; then
+        echo "Errore sintattico rilevato nel codice PHP modificato! Rilascio bloccato."
+        exit 1
+      else
+        echo "Tutti i file modificati hanno superato i controlli. Quality Gate superato!"
+      fi
+ 
+  # Eseguiamo il controllo differenziale solo per le Richieste di Merge
+  only:
+    - merge_requests
+    - branches
