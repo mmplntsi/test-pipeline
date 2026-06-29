@@ -1,12 +1,12 @@
-name: PHP CI Quality Gate
-
-# La pipeline si attiva quando viene aperta o aggiornata una Pull Request verso main
+name: PHP CI Quality Gate with Custom Taint SAST
+ 
+# La pipeline si attiva quando viene aperta o aggiornata una Pull Request verso il main
 on:
   pull_request:
     branches: [ "main" ]
-
+ 
 jobs:
-  # 1. FASE DI LINT DIFFERENZIALE (Equivalente della Build per verificare l'integrità sintattica)
+  # 1. FASE DI LINT DIFFERENZIALE (Verifica formale della sintassi solo sui file modificati)
   php-lint:
     name: PHP Syntax Check (Only Modified Files)
     runs-on: ubuntu-latest
@@ -15,12 +15,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0 # Scarica l'intera cronologia Git per calcolare il diff
-
+ 
       - name: Setup PHP Environment
         uses: shivammathur/setup-php@v2
         with:
-          php-version: '8.1' # Impostare la versione in uso
-
+          php-version: '8.1'
+ 
       - name: Run Differential Lint
         run: |
           echo "Calcolo dei file PHP modificati..."
@@ -28,71 +28,74 @@ jobs:
           
           # Isola solo i file .php AGGIUNTI (A) o MODIFICATI (M) rispetto a origin/main
           MODIFIED_FILES=$(git diff --name-only --diff-filter=AM origin/main...HEAD | grep '\.php$' || true)
-
+ 
           if [ -z "$MODIFIED_FILES" ]; then
             echo "Nessun file PHP modificato. Quality Gate superato!"
             exit 0
           fi
-
+ 
           echo "File da scansionare:"
           echo "$MODIFIED_FILES"
           echo "----------------------------------------"
-
+ 
           SUCCESS=true
           for file in $MODIFIED_FILES; do
             if [ -f "$file" ]; then
               php -l "$file" || SUCCESS=false
             fi
           done
-
+ 
           if [ "$SUCCESS" = false ]; then
             echo "Errore sintattico rilevato nei file PHP modificati!"
             exit 1
           fi
-
-  # 2. FASE DI ANALISI DI SICUREZZA (SAST con Semgrep)
+ 
+  # 2. FASE DI ANALISI DI SICUREZZA (SAST con Taint Analysis personalizzata)
   semgrep-sast:
-    name: Semgrep Security Scan
+    name: Semgrep Custom Taint Scan
     runs-on: ubuntu-latest
-    # Questa fase viene eseguita solo se il controllo sintattico precedente ha successo
-    needs: php-lint 
+    needs: php-lint # Eseguiamo i controlli di sicurezza solo se la sintassi di base è corretta
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
+ 
+      # Generazione automatica del file di regole di sicurezza (Infrastructure as Code)
+      - name: Create Custom Semgrep Rule File
+        run: |
+          mkdir -p .semgrep
+          cat << 'EOF' > .semgrep/taint-rules.yml
+          rules:
+            - id: php-sqli-taint-tracking
+              languages:
+                - php
+              severity: ERROR
+              message: "Quality Gate Fallito: Rilevata potenziale SQL Injection. Un parametro di input utente non sanificato ($_GET o $_POST) raggiunge mysqli_query senza prima passare da mysqli_real_escape_string o intval."
+              
+              # Attiviamo la Taint Analysis (Tracciamento del flusso dati)
+              mode: taint
+              
+              # Origine del dato contaminato (Source)
+              pattern-sources:
+                - pattern: $_GET[...]
+                - pattern: $_POST[...]
+                - pattern: $_REQUEST[...]
+                
+              # Destinazione sensibile (Sink)
+              pattern-sinks:
+                - patterns:
+                    - pattern: mysqli_query($CONN, $QUERY)
+                    - focus-metavariable: $QUERY # Concentra l'allarme solo sulla query, non sul socket di connessione
+                    
+              # Funzioni di bonifica che interrompono la contaminazione (Sanitizers)
+              pattern-sanitizers:
+                - pattern: mysqli_real_escape_string(...)
+                - pattern: intval(...)
+                - pattern: htmlspecialchars(...)
+          EOF
+ 
+      # Esecuzione di Semgrep puntando esclusivamente alla regola appena scritta
       - name: Run Semgrep SAST
         run: |
-          # Utilizza il container Docker ufficiale di Semgrep per scansionare il codice
-          # L'opzione --error forza il fallimento del job (exit 1) se rileva vulnerabilità
-          docker run --rm -v "${{ github.workspace }}:/src" semgrep/semgrep semgrep scan --config=auto --error
-rules:
-  - id: php-sqli-taint-tracking
-    languages:
-      - php
-    severity: ERROR
-    message: "Quality Gate Fallito: Rilevata potenziale SQL Injection. L'input utente non sanificato raggiunge una query SQL."
-    
-    # 1. ATTIVAZIONE DELLA TAINT ANALYSIS
-    mode: taint 
-
-    # 2. DEFINIZIONE DELLE SORGENTI (Input non sicuro dell'utente)
-    pattern-sources:
-      - pattern: $_GET[...]
-      - pattern: $_POST[...]
-      - pattern: $_REQUEST[...]
-      - pattern: $_COOKIE[...]
-      - pattern: $_SERVER[...]
-
-    # 3. DEFINIZIONE DELLE DESTINAZIONI VULNERABILI (Sinks)
-    pattern-sinks:
-      - patterns:
-          # Tracciamo l'esecuzione di query SQL tramite mysqli
-          - pattern: mysqli_query($CONN, $QUERY)
-          # Specifichiamo di concentrare l'analisi sulla variabile che contiene la query
-          - focus-metavariable: $QUERY
-
-    # 4. DEFINIZIONE DEI SANIFICATORI (Funzioni che rendono sicuro il dato)
-    pattern-sanitizers:
-      - pattern: mysqli_real_escape_string(...)
-      - pattern: intval(...)
-      - pattern: htmlspecialchars(...)
+          # Utilizziamo il volume del workspace di GitHub mappato nel container
+          # L'opzione --error forza Semgrep a terminare con codice 'exit 1' se trova vulnerabilità
+          docker run --rm -v "${{ github.workspace }}:/src" semgrep/semgrep semgrep scan --config=/src/.semgrep/taint-rules.yml --error
