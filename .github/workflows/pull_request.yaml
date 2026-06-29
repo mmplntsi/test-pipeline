@@ -1,52 +1,67 @@
-stages:
-  - test
- 
-variables:
-  PHP_IMAGE: "php:8.0-cli"
- 
-php_differential_gate:
-  stage: test
-  image: $PHP_IMAGE
-  before_script:
-    # Installiamo Git nel runner temporaneo per consentire il calcolo delle differenze
-    - apt-get update -y && apt-get install -y git
-  script:
-    - echo "=== Avvio del controllo di qualità differenziale ==="
-    
-    # Scarichiamo il ramo principale per effettuare il confronto storico
-    - git fetch origin main
-    
-    # Estraiamo solo i file .php con stato Aggiunto (A) o Modificato (M)
-    - MODIFIED_FILES=$(git diff --name-only --diff-filter=AM origin/main...HEAD | grep '\.php$' || true)
-    
-    - |
-      if [ -z "$MODIFIED_FILES" ]; then
-        echo "Nessun file PHP modificato. Quality Gate superato con successo!"
-        exit 0
-      fi
-    
-    - echo "File modificati da validare:"
-    - echo "$MODIFIED_FILES"
-    
-    # Eseguiamo il linter di precisione
-    - SUCCESS=true
-    - |
-      for file in $MODIFIED_FILES; do
-        if [ -f "$file" ]; then
-          php -l "$file" || SUCCESS=false
-        fi
-      done
-    
-    # Esito finale del cancello di qualità
-    - |
-      if [ "$SUCCESS" = false ]; then
-        echo "Errore sintattico rilevato nel codice PHP modificato! Rilascio bloccato."
-        exit 1
-      else
-        echo "Tutti i file modificati hanno superato i controlli. Quality Gate superato!"
-      fi
- 
-  # Eseguiamo il controllo differenziale solo per le Richieste di Merge
-  only:
-    - merge_requests
-    - branches
+name: PHP CI Quality Gate
+
+# La pipeline si attiva quando viene aperta o aggiornata una Pull Request verso main
+on:
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  # 1. FASE DI LINT DIFFERENZIALE (Equivalente della Build per verificare l'integrità sintattica)
+  php-lint:
+    name: PHP Syntax Check (Only Modified Files)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Scarica l'intera cronologia Git per calcolare il diff
+
+      - name: Setup PHP Environment
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1' # Impostare la versione in uso
+
+      - name: Run Differential Lint
+        run: |
+          echo "Calcolo dei file PHP modificati..."
+          git fetch origin main
+          
+          # Isola solo i file .php AGGIUNTI (A) o MODIFICATI (M) rispetto a origin/main
+          MODIFIED_FILES=$(git diff --name-only --diff-filter=AM origin/main...HEAD | grep '\.php$' || true)
+
+          if [ -z "$MODIFIED_FILES" ]; then
+            echo "Nessun file PHP modificato. Quality Gate superato!"
+            exit 0
+          fi
+
+          echo "File da scansionare:"
+          echo "$MODIFIED_FILES"
+          echo "----------------------------------------"
+
+          SUCCESS=true
+          for file in $MODIFIED_FILES; do
+            if [ -f "$file" ]; then
+              php -l "$file" || SUCCESS=false
+            fi
+          done
+
+          if [ "$SUCCESS" = false ]; then
+            echo "Errore sintattico rilevato nei file PHP modificati!"
+            exit 1
+          fi
+
+  # 2. FASE DI ANALISI DI SICUREZZA (SAST con Semgrep)
+  semgrep-sast:
+    name: Semgrep Security Scan
+    runs-on: ubuntu-latest
+    # Questa fase viene eseguita solo se il controllo sintattico precedente ha successo
+    needs: php-lint 
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep SAST
+        run: |
+          # Utilizza il container Docker ufficiale di Semgrep per scansionare il codice
+          # L'opzione --error forza il fallimento del job (exit 1) se rileva vulnerabilità
+          docker run --rm -v "${{ github.workspace }}:/src" semgrep/semgrep semgrep scan --config=auto --error
