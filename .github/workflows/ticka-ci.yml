@@ -1,0 +1,211 @@
+name: Ticka Deterministic CI
+
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint PHP Sources
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP 8.0.30
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.0.30'
+          coverage: none
+
+      - name: Lint tracked PHP files
+        shell: bash
+        run: |
+          mapfile -t php_files < <(git ls-files | grep '\.php$' || true)
+
+          if [ "${#php_files[@]}" -eq 0 ]; then
+            echo "No PHP files to lint."
+            exit 0
+          fi
+
+          for file in "${php_files[@]}"; do
+            php -l "$file"
+          done
+
+  build:
+    name: Build Dependencies
+    runs-on: ubuntu-24.04
+    needs: lint
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP 8.0.30
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.0.30'
+          tools: composer:v2
+          coverage: none
+
+      - name: Validate composer manifest
+        run: composer validate --strict
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Upload immutable build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ticka-build-${{ github.sha }}
+          path: |
+            composer.json
+            composer.lock
+            index.php
+            phpunit.xml
+            src/
+            tests/
+            vendor/
+          if-no-files-found: error
+
+  unit-tests:
+    name: Run PHPUnit
+    runs-on: ubuntu-24.04
+    needs: build
+    steps:
+      - name: Download immutable build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ticka-build-${{ github.sha }}
+          path: .
+
+      - name: Create report directories
+        run: mkdir -p build/logs build/reports
+
+      - name: Execute PHPUnit test suite
+        run: composer test:ci
+
+      - name: Publish test summary
+        if: always()
+        shell: bash
+        run: |
+          if [ ! -f build/logs/junit.xml ]; then
+            echo "No JUnit report produced." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          php -r '$xml = simplexml_load_file("build/logs/junit.xml"); $tests = (int) $xml["tests"]; $failures = (int) $xml["failures"]; $errors = (int) $xml["errors"]; $passed = $tests - $failures - $errors; $rate = $tests === 0 ? 0 : round(($passed / $tests) * 100, 2); file_put_contents(getenv("GITHUB_ENV"), "TESTS=$tests\nFAILURES=$failures\nERRORS=$errors\nPASSED=$passed\nPASS_RATE=$rate\n", FILE_APPEND);'
+
+          {
+            echo "## PHPUnit pass rate"
+            echo "<progress value=\"$PASSED\" max=\"$TESTS\"></progress>"
+            echo
+            echo "| Metric | Value |"
+            echo "| --- | ---: |"
+            echo "| Passed | $PASSED |"
+            echo "| Failures | $FAILURES |"
+            echo "| Errors | $ERRORS |"
+            echo "| Pass rate | $PASS_RATE% |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ticka-test-reports-${{ github.sha }}
+          path: |
+            build/logs/junit.xml
+            build/reports/testdox.html
+          if-no-files-found: error
+
+  coverage:
+    name: Calculate Coverage
+    runs-on: ubuntu-24.04
+    needs: unit-tests
+    steps:
+      - name: Download immutable build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ticka-build-${{ github.sha }}
+          path: .
+
+      - name: Create coverage directories
+        run: mkdir -p build/logs build/reports build/coverage
+
+      - name: Execute coverage run
+        env:
+          XDEBUG_MODE: coverage
+        run: composer test:coverage
+
+      - name: Publish coverage summary
+        shell: bash
+        run: |
+          php -r '$xml = simplexml_load_file("build/logs/clover.xml"); $metrics = $xml->project->metrics; $statements = (int) $metrics["statements"]; $covered = (int) $metrics["coveredstatements"]; $rate = $statements === 0 ? 0 : round(($covered / $statements) * 100, 2); file_put_contents(getenv("GITHUB_ENV"), "STATEMENTS=$statements\nCOVERED=$covered\nCOVERAGE_RATE=$rate\n", FILE_APPEND);'
+
+          {
+            echo "## Line coverage"
+            echo "<progress value=\"$COVERED\" max=\"$STATEMENTS\"></progress>"
+            echo
+            echo "| Metric | Value |"
+            echo "| --- | ---: |"
+            echo "| Covered statements | $COVERED |"
+            echo "| Total statements | $STATEMENTS |"
+            echo "| Coverage | $COVERAGE_RATE% |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ticka-coverage-${{ github.sha }}
+          path: |
+            build/logs/clover.xml
+            build/coverage/
+            build/reports/testdox.html
+          if-no-files-found: error
+
+  preserve-artifacts:
+    name: Preserve CI Evidence
+    runs-on: ubuntu-24.04
+    needs: coverage
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ticka-build-${{ github.sha }}
+          path: ci-evidence/build
+
+      - name: Download test reports
+        uses: actions/download-artifact@v4
+        with:
+          name: ticka-test-reports-${{ github.sha }}
+          path: ci-evidence/tests
+
+      - name: Download coverage reports
+        uses: actions/download-artifact@v4
+        with:
+          name: ticka-coverage-${{ github.sha }}
+          path: ci-evidence/coverage
+
+      - name: Write evidence manifest
+        shell: bash
+        run: |
+          cat <<EOF > ci-evidence/manifest.txt
+          workflow=Ticka Deterministic CI
+          commit=${GITHUB_SHA}
+          run_id=${GITHUB_RUN_ID}
+          php=8.0.30
+          phpunit=9.6.35
+          EOF
+
+      - name: Upload immutable evidence bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ticka-ci-evidence-${{ github.sha }}
+          path: ci-evidence/
+          if-no-files-found: error
